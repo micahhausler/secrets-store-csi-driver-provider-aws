@@ -8,9 +8,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/endpointcreds"
-	authv1 "k8s.io/api/authentication/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 const (
@@ -25,48 +22,6 @@ var (
 	podIdentityAgentEndpointIPv6 = defaultIPv6Endpoint
 )
 
-type podIdentityTokenFetcher struct {
-	nameSpace, svcAcc, podName string
-	k8sClient                  k8sv1.CoreV1Interface
-}
-
-func newPodIdentityTokenFetcher(
-	nameSpace, svcAcc, podName string,
-	k8sClient k8sv1.CoreV1Interface,
-) endpointcreds.AuthTokenProvider {
-	return &podIdentityTokenFetcher{
-		nameSpace: nameSpace,
-		svcAcc:    svcAcc,
-		podName:   podName,
-		k8sClient: k8sClient,
-	}
-}
-
-// validate the podIdentityTokenFetcher implements the endpointcreds.AuthTokenProvider interface
-var _ endpointcreds.AuthTokenProvider = &podIdentityTokenFetcher{}
-
-func (p *podIdentityTokenFetcher) GetToken() (string, error) {
-	tokenSpec := authv1.TokenRequestSpec{
-		Audiences: []string{podIdentityAudience},
-		BoundObjectRef: &authv1.BoundObjectReference{
-			Kind: "Pod",
-			Name: p.podName,
-		},
-	}
-
-	// Use the K8s API to fetch the token associated with service account
-	tokRsp, err := p.k8sClient.ServiceAccounts(p.nameSpace).CreateToken(
-		context.Background(),
-		p.svcAcc,
-		&authv1.TokenRequest{Spec: tokenSpec},
-		metav1.CreateOptions{})
-	if err != nil {
-		return "", err
-	}
-
-	return tokRsp.Status.Token, nil
-}
-
 // PodIdentityCredentialProvider implements CredentialProvider using pod identity
 type PodIdentityCredentialProvider struct {
 	region             string
@@ -76,8 +31,7 @@ type PodIdentityCredentialProvider struct {
 }
 
 func NewPodIdentityCredentialProvider(
-	region, nameSpace, svcAcc, podName, preferredAddressType string,
-	k8sClient k8sv1.CoreV1Interface,
+	region, preferredAddressType string, tokenFetcher TokenFetcher,
 ) (ConfigProvider, error) {
 
 	endpoint := podIdentityAgentEndpointIPv4
@@ -88,7 +42,7 @@ func NewPodIdentityCredentialProvider(
 	return &PodIdentityCredentialProvider{
 		region:             region,
 		credentialEndpoint: endpoint,
-		fetcher:            newPodIdentityTokenFetcher(nameSpace, svcAcc, podName, k8sClient),
+		fetcher:            tokenFetcher,
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
 		},

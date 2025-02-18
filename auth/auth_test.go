@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/secrets-store-csi-driver-provider-aws/credential_provider"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -16,7 +17,7 @@ type mockSTS struct {
 }
 
 func (m *mockSTS) AssumeRoleWithWebIdentity(ctx context.Context, params *sts.AssumeRoleWithWebIdentityInput, optFns ...func(*sts.Options)) (*sts.AssumeRoleWithWebIdentityOutput, error) {
-	return nil, fmt.Errorf("fake error for serviceaccounst")
+	return nil, fmt.Errorf("fake error for serviceaccounts")
 }
 
 type sessionTest struct {
@@ -25,13 +26,18 @@ type sessionTest struct {
 	cfgError        string
 }
 
-func TestGetAWSSession(t *testing.T) {
+func TestGetAWSConfig(t *testing.T) {
+	const (
+		region         = "someRegion"
+		namespace      = "someNamespace"
+		serviceAccount = "someSvcAcc"
+	)
+
 	cases := []sessionTest{
 		{
 			testName:        "IRSA",
 			testPodIdentity: false,
 			cfgError:        "serviceaccounts", // IRSA path will fail at getting creds since its in the hot path of the config
-
 		},
 		{
 			testName:        "Pod Identity",
@@ -41,23 +47,30 @@ func TestGetAWSSession(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.testName, func(t *testing.T) {
-
-			auth, err := NewAuth(
-				"someRegion",
-				"someNamespace",
-				"someSvcAcc",
-				"somepod",
-				"",
-				tt.testPodIdentity,
-				fake.NewSimpleClientset().CoreV1(),
+			var (
+				provider credential_provider.ConfigProvider
+				err      error
 			)
+
+			tokenFetcher := credential_provider.NewTokenFetcher(nil, "someVolumeID", region)
+			k8sClient := fake.NewSimpleClientset().CoreV1()
+
+			if tt.testPodIdentity {
+				provider, err = NewPodIdentityAuth(region, "ipv4", tokenFetcher)
+			} else {
+				provider, err = NewIRSAAuth(region, namespace, serviceAccount, k8sClient, tokenFetcher)
+				if err == nil {
+					if irsaProvider, ok := provider.(*irsaAuth); ok {
+						irsaProvider.stsClient = &mockSTS{}
+					}
+				}
+			}
+
 			if err != nil {
 				t.Fatalf("%s case: failed to create auth: %v", tt.testName, err)
 			}
-			auth.stsClient = &mockSTS{}
-			auth.k8sClient = fake.NewSimpleClientset().CoreV1()
 
-			cfg, err := auth.GetAWSConfig(context.Background())
+			cfg, err := provider.GetAWSConfig(context.Background())
 
 			if len(tt.cfgError) == 0 && err != nil {
 				t.Errorf("%s case: got unexpected auth error: %s", tt.testName, err)

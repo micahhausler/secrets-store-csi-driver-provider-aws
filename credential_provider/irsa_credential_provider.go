@@ -7,7 +7,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
-	authv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog/v2"
@@ -19,41 +18,6 @@ const (
 	irsaAudience  = "sts.amazonaws.com"
 	ProviderName  = "secrets-store-csi-driver-provider-aws"
 )
-
-type irsaTokenFetcher struct {
-	namespace      string
-	serviceAccount string
-	k8sClient      k8sv1.CoreV1Interface
-}
-
-func newIRSATokenFetcher(nameSpace, serviceAccount string, k8sClient k8sv1.CoreV1Interface) stscreds.IdentityTokenRetriever {
-	return &irsaTokenFetcher{
-		namespace:      nameSpace,
-		serviceAccount: serviceAccount,
-		k8sClient:      k8sClient,
-	}
-}
-
-// Private helper to fetch a JWT token for a given namespace and service account.
-//
-// See also: https://pkg.go.dev/k8s.io/client-go/kubernetes/typed/core/v1
-func (p *irsaTokenFetcher) GetIdentityToken() ([]byte, error) {
-	// Use the K8s API to fetch the token from the OIDC provider.
-	tokRsp, err := p.k8sClient.ServiceAccounts(p.namespace).CreateToken(
-		context.Background(),
-		p.serviceAccount,
-		&authv1.TokenRequest{
-			Spec: authv1.TokenRequestSpec{
-				Audiences: []string{irsaAudience},
-			},
-		},
-		metav1.CreateOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	return []byte(tokRsp.Status.Token), nil
-}
 
 // IRSACredentialProvider implements CredentialProvider using IAM Roles for Service Accounts
 type IRSACredentialProvider struct {
@@ -67,14 +31,15 @@ func NewIRSACredentialProvider(
 	stsClient stscreds.AssumeRoleWithWebIdentityAPIClient,
 	region, namespace, serviceAccount string,
 	k8sClient k8sv1.CoreV1Interface,
+	tokenFetcher TokenFetcher,
 ) ConfigProvider {
 	return &IRSACredentialProvider{
 		stsClient:      stsClient,
-		k8sClient:      k8sClient,
 		region:         region,
 		namespace:      namespace,
 		serviceAccount: serviceAccount,
-		fetcher:        newIRSATokenFetcher(namespace, serviceAccount, k8sClient),
+		k8sClient:      k8sClient,
+		fetcher:        tokenFetcher,
 	}
 }
 

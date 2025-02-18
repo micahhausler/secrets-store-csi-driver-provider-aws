@@ -8,12 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"k8s.io/client-go/kubernetes/fake"
-)
-
-const (
-	testPodName = "somePodName"
 )
 
 func setupMockPodIdentityAgent(t *testing.T, isIPv4, shouldFail bool) *httptest.Server {
@@ -47,12 +41,6 @@ func setupMockPodIdentityAgent(t *testing.T, isIPv4, shouldFail bool) *httptest.
 
 func newPodIdentityCredentialWithMock(t *testing.T, isIPv4 bool, tstData podIdentityCredentialTest) (*PodIdentityCredentialProvider, chan<- struct{}) {
 	t.Helper()
-	clientset := fake.NewSimpleClientset()
-	k8sClient := &mockK8sV1{
-		clientset.CoreV1(),
-		clientset.CoreV1(),
-		tstData.k8CTOneShotError,
-	}
 
 	mockServer := setupMockPodIdentityAgent(t, isIPv4, tstData.podIdentityError)
 	respChan := make(chan struct{})
@@ -69,18 +57,21 @@ func newPodIdentityCredentialWithMock(t *testing.T, isIPv4 bool, tstData podIden
 		podIdentityAgentEndpointIPv6 = mockServer.URL
 	}
 
+	fetcher := NewMockTokenFetcher("FAKETOKEN", nil)
+	if tstData.podIdentityError {
+		fetcher = NewMockTokenFetcher("", fmt.Errorf("failed to get token"))
+	}
+
 	return &PodIdentityCredentialProvider{
 		region:             testRegion,
 		credentialEndpoint: credentialEndpoint,
-		fetcher:            newPodIdentityTokenFetcher(testNamespace, testServiceAccount, testPodName, k8sClient),
+		fetcher:            fetcher,
 		httpClient:         http.DefaultClient,
 	}, respChan
 }
 
 type podIdentityCredentialTest struct {
 	testName          string
-	k8CTOneShotError  bool
-	testToken         bool
 	podIdentityError  bool
 	preferredEndpoint string
 	expError          string
@@ -88,12 +79,12 @@ type podIdentityCredentialTest struct {
 
 func TestPodIdentityCredentialProvider(t *testing.T) {
 	cases := []podIdentityCredentialTest{
-		{"Pod Identity Success via IPv4", false, false, false, "ipv4", ""},
-		{"Pod Identity Success via IPv6", false, false, false, "ipv6", ""},
-		{"Pod Identity Success via auto selection", false, false, false, "auto", ""},
-		{"Pod identity Failure via IPv4", false, false, true, "ipv4", "failed to refresh cached credentials, failed to load credentials, exceeded maximum number of attempts, 3, : "},
-		{"Pod identity Failure via IPv6", false, false, true, "ipv6", "failed to refresh cached credentials, failed to load credentials, exceeded maximum number of attempts, 3, : "},
-		{"Pod identity Failure via auto selection", false, false, true, "auto", "failed to refresh cached credentials, failed to load credentials, exceeded maximum number of attempts, 3, : "},
+		{"Pod Identity Success via IPv4", false, "ipv4", ""},
+		{"Pod Identity Success via IPv6", false, "ipv6", ""},
+		{"Pod Identity Success via auto selection", false, "auto", ""},
+		{"Pod identity Failure via IPv4", true, "ipv4", "failed to refresh cached credentials, failed to load credentials"},
+		{"Pod identity Failure via IPv6", true, "ipv6", "failed to refresh cached credentials, failed to load credentials"},
+		{"Pod identity Failure via auto selection", true, "auto", "failed to refresh cached credentials, failed to load credentials"},
 	}
 
 	for _, tt := range cases {
@@ -122,8 +113,8 @@ func TestPodIdentityCredentialProvider(t *testing.T) {
 
 func TestPodIdentityToken(t *testing.T) {
 	cases := []podIdentityCredentialTest{
-		{"Pod Identity Token Success", false, true, false, "", ""},
-		{"Pod Identity Fetch JWT fail", true, true, false, "", "Fake create token"},
+		{"Pod Identity Token Success", false, "", ""},
+		{"Pod Identity Fetch JWT fail", true, "", "failed to get token"},
 	}
 
 	for _, tt := range cases {

@@ -10,12 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	secretsmanagertypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/jellydator/ttlcache/v3"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/aws/secrets-store-csi-driver-provider-aws/auth"
+	"github.com/aws/secrets-store-csi-driver-provider-aws/credential_provider"
 	"github.com/aws/secrets-store-csi-driver-provider-aws/provider"
 )
 
@@ -202,6 +205,7 @@ func newServerWithMocks(tstData *testCase, driverWrites bool) *CSIDriverProvider
 		secretProviderFactory: factory,
 		k8sClient:             clientset.CoreV1(),
 		driverWriteSecrets:    driverWrites,
+		tokenCache:            ttlcache.New[string, credential_provider.TokenCacheValue](ttlcache.WithTTL[string, credential_provider.TokenCacheValue](time.Hour)),
 	}
 
 }
@@ -233,6 +237,9 @@ func buildMountReq(t *testing.T, dir string, tst testCase, curState []*v1alpha1.
 	attrMap["csi.storage.k8s.io/pod.name"] = tst.attributes["podName"]
 	attrMap["csi.storage.k8s.io/pod.namespace"] = tst.attributes["namespace"]
 	attrMap["csi.storage.k8s.io/serviceAccount.name"] = tst.attributes["accName"]
+	if tst.attributes["tokens"] != "" {
+		attrMap["csi.storage.k8s.io/serviceAccount.tokens"] = tst.attributes["tokens"]
+	}
 
 	region := tst.attributes["region"]
 	if len(region) > 0 && !strings.Contains(region, "Fail") {
@@ -935,6 +942,47 @@ var mountTests []testCase = []testCase{
 		expSecrets: map[string]string{
 			"TestSecret1": "secret1",
 			"TestParm1":   "parm1",
+		},
+		perms: "420",
+	},
+	{
+		testName: "IRSA with token",
+		attributes: map[string]string{
+			"namespace": "fakeNS", "accName": "fakeSvcAcc", "podName": "fakePod",
+			"nodeName": "fakeNode", "region": "us-west-2", "roleARN": "fakeRole",
+			"tokens": fmt.Sprintf(`{"sts.amazonaws.com": {"token": "testToken", "expirationTimestamp": "%s"}}`, time.Now().Add(time.Hour).Format(time.RFC3339)),
+			"secret-store-csi.amazonaws.com/volume-id": "testVolumeId",
+		},
+		mountObjs: []map[string]interface{}{
+			{"objectName": "TestSecret1", "objectType": "secretsmanager"},
+		},
+		gsvRsp: []*secretsmanager.GetSecretValueOutput{
+			{SecretString: aws.String("secret1"), VersionId: aws.String("1")},
+		},
+		expErr: "",
+		expSecrets: map[string]string{
+			"TestSecret1": "secret1",
+		},
+		perms: "420",
+	},
+	{
+		testName: "Pod Identity with token",
+		attributes: map[string]string{
+			"namespace": "fakeNS", "accName": "fakeSvcAcc", "podName": "fakePod",
+			"nodeName": "fakeNode", "region": "us-west-2", "roleARN": "fakeRole",
+			"usePodIdentity": "true",
+			"tokens":         fmt.Sprintf(`{"pods.eks.amazonaws.com": {"token": "testToken", "expirationTimestamp": "%s"}}`, time.Now().Add(time.Hour).Format(time.RFC3339)),
+			"secret-store-csi.amazonaws.com/volume-id": "testVolumeId",
+		},
+		mountObjs: []map[string]interface{}{
+			{"objectName": "TestSecret1", "objectType": "secretsmanager"},
+		},
+		gsvRsp: []*secretsmanager.GetSecretValueOutput{
+			{SecretString: aws.String("secret1"), VersionId: aws.String("1")},
+		},
+		expErr: "",
+		expSecrets: map[string]string{
+			"TestSecret1": "secret1",
 		},
 		perms: "420",
 	},
@@ -1922,6 +1970,47 @@ var noWriteMountTests []testCase = []testCase{
 		expSecrets: map[string]string{
 			"mypath/TestSecret1": "secret1",
 			"mypath/TestParm1":   "parm1",
+		},
+		perms: "420",
+	},
+
+	{
+		testName: "IRSA missing sts token",
+		attributes: map[string]string{
+			"namespace": "fakeNS", "accName": "fakeSvcAcc", "podName": "fakePod",
+			"nodeName": "fakeNode", "region": "", "roleARN": "fakeRole",
+			"usePodIdentity": "false",
+			"tokens":         `{"sts2.amazonaws.com": {"token": "testToken", "expirationTimestamp": "2021-01-01T00:00:00Z"}}`,
+		},
+		mountObjs: []map[string]interface{}{
+			{"objectName": "TestSecret1", "objectType": "secretsmanager"},
+		},
+		gsvRsp: []*secretsmanager.GetSecretValueOutput{
+			{SecretString: aws.String("secret1"), VersionId: aws.String("1")},
+		},
+		expErr: "token not found for sts.amazonaws.com",
+		expSecrets: map[string]string{
+			"TestSecret1": "secret1",
+		},
+		perms: "420",
+	},
+	{
+		testName: "Pod Identity missing token",
+		attributes: map[string]string{
+			"namespace": "fakeNS", "accName": "fakeSvcAcc", "podName": "fakePod",
+			"nodeName": "fakeNode", "region": "", "roleARN": "fakeRole",
+			"usePodIdentity": "true",
+			"tokens":         `{"sts.amazonaws.com": {"token": "testToken", "expirationTimestamp": "2021-01-01T00:00:00Z"}}`,
+		},
+		mountObjs: []map[string]interface{}{
+			{"objectName": "TestSecret1", "objectType": "secretsmanager"},
+		},
+		gsvRsp: []*secretsmanager.GetSecretValueOutput{
+			{SecretString: aws.String("secret1"), VersionId: aws.String("1")},
+		},
+		expErr: "token not found for pods.eks.amazonaws.com",
+		expSecrets: map[string]string{
+			"TestSecret1": "secret1",
 		},
 		perms: "420",
 	},
